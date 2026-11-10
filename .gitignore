@@ -1,0 +1,30 @@
+## Build and output directories
+bin/
+obj/
+publish/
+dist/
+
+## User-specific and environment files
+*.suo
+*.user
+*.userosscache
+*.sln.docstates
+.vscode/
+.idea/
+*.swp
+*~
+
+## SQLite database files created during development or local runs
+*.db
+*.db-shm
+*.db-wal
+
+## Inno Setup temporary output
+Output/
+_ISMSI/
+
+## OS generated files
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+$RECYCLE.BIN/

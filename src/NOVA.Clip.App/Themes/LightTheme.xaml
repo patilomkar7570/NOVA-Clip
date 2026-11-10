@@ -1,0 +1,60 @@
+<ResourceDictionary xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+                    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml">
+
+    <!-- Backgrounds -->
+    <Color x:Key="ColorAppBackground">#F8FAFC</Color>
+    <SolidColorBrush x:Key="BrushAppBackground" Color="{StaticResource ColorAppBackground}" />
+
+    <Color x:Key="ColorSidebarBackground">#F1F5F9</Color>
+    <SolidColorBrush x:Key="BrushSidebarBackground" Color="{StaticResource ColorSidebarBackground}" />
+
+    <Color x:Key="ColorSurface">#FFFFFF</Color>
+    <SolidColorBrush x:Key="BrushSurface" Color="{StaticResource ColorSurface}" />
+
+    <Color x:Key="ColorSurfaceHover">#F8FAFC</Color>
+    <SolidColorBrush x:Key="BrushSurfaceHover" Color="{StaticResource ColorSurfaceHover}" />
+
+    <Color x:Key="ColorSurfaceActive">#F1F5F9</Color>
+    <SolidColorBrush x:Key="BrushSurfaceActive" Color="{StaticResource ColorSurfaceActive}" />
+
+    <!-- Borders -->
+    <Color x:Key="ColorBorder">#E2E8F0</Color>
+    <SolidColorBrush x:Key="BrushBorder" Color="{StaticResource ColorBorder}" />
+
+    <Color x:Key="ColorBorderSubtle">#EDF2F7</Color>
+    <SolidColorBrush x:Key="BrushBorderSubtle" Color="{StaticResource ColorBorderSubtle}" />
+
+    <!-- Text -->
+    <Color x:Key="ColorTextPrimary">#0F172A</Color>
+    <SolidColorBrush x:Key="BrushTextPrimary" Color="{StaticResource ColorTextPrimary}" />
+
+    <Color x:Key="ColorTextSecondary">#475569</Color>
+    <SolidColorBrush x:Key="BrushTextSecondary" Color="{StaticResource ColorTextSecondary}" />
+
+    <Color x:Key="ColorTextMuted">#94A3B8</Color>
+    <SolidColorBrush x:Key="BrushTextMuted" Color="{StaticResource ColorTextMuted}" />
+
+    <!-- Accent -->
+    <Color x:Key="ColorAccent">#2563EB</Color>
+    <SolidColorBrush x:Key="BrushAccent" Color="{StaticResource ColorAccent}" />
+
+    <Color x:Key="ColorAccentHover">#1D4ED8</Color>
+    <SolidColorBrush x:Key="BrushAccentHover" Color="{StaticResource ColorAccentHover}" />
+
+    <Color x:Key="ColorAccentSoft">#EFF6FF</Color>
+    <SolidColorBrush x:Key="BrushAccentSoft" Color="{StaticResource ColorAccentSoft}" />
+
+    <!-- Functional -->
+    <Color x:Key="ColorDanger">#DC2626</Color>
+    <SolidColorBrush x:Key="BrushDanger" Color="{StaticResource ColorDanger}" />
+
+    <Color x:Key="ColorSuccess">#059669</Color>
+    <SolidColorBrush x:Key="BrushSuccess" Color="{StaticResource ColorSuccess}" />
+
+    <Color x:Key="ColorWarning">#D97706</Color>
+    <SolidColorBrush x:Key="BrushWarning" Color="{StaticResource ColorWarning}" />
+
+    <Color x:Key="ColorFavorite">#F59E0B</Color>
+    <SolidColorBrush x:Key="BrushFavorite" Color="{StaticResource ColorFavorite}" />
+
+</ResourceDictionary>
