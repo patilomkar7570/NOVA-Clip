@@ -26,6 +26,12 @@
 
   <ItemGroup>
     <Resource Include="Resources\app.ico" />
+    <Resource Include="Resources\logo.png" />
+    <Resource Include="Resources\logo-white.png" />
+    <Resource Include="Resources\logo-accent.png" />
+    <Content Include="Resources\*.*">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </Content>
   </ItemGroup>
 
 </Project>

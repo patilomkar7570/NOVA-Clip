@@ -52,11 +52,14 @@ public class TrayIconService : IDisposable
         public IntPtr hBalloonIcon;
     }
 
-    [DllImport("shell32.dll", CharSet = CharSet.Unicode)]
+    [DllImport("shell32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
     private static extern bool Shell_NotifyIcon(uint dwMessage, ref NOTIFYICONDATA lpData);
 
-    [DllImport("user32.dll", SetLastError = true)]
+    [DllImport("user32.dll", SetLastError = true, CharSet = CharSet.Unicode)]
     private static extern IntPtr LoadImage(IntPtr hinst, string lpszName, uint uType, int cxDesired, int cyDesired, uint fuLoad);
+
+    [DllImport("user32.dll")]
+    private static extern IntPtr LoadIcon(IntPtr hInstance, IntPtr lpIconName);
 
     [DllImport("user32.dll")]
     [return: MarshalAs(UnmanagedType.Bool)]
@@ -65,6 +68,9 @@ public class TrayIconService : IDisposable
     [DllImport("user32.dll")]
     [return: MarshalAs(UnmanagedType.Bool)]
     private static extern bool DestroyIcon(IntPtr hIcon);
+
+    [DllImport("shell32.dll", CharSet = CharSet.Unicode)]
+    private static extern uint ExtractIconEx(string szFileName, int nIconIndex, out IntPtr phiconLarge, out IntPtr phiconSmall, uint nIcons);
 
     [StructLayout(LayoutKind.Sequential)]
     private struct POINT
@@ -98,20 +104,50 @@ public class TrayIconService : IDisposable
 
         try
         {
-            string icoPath = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "Resources", "app.ico");
-            if (File.Exists(icoPath))
+            string[] candidatePaths =
+            [
+                Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "Resources", "app.ico"),
+                Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "app.ico"),
+                Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "assets", "icon.ico")
+            ];
+
+            foreach (var path in candidatePaths)
             {
-                _hIcon = LoadImage(IntPtr.Zero, icoPath, 1 /* IMAGE_ICON */, 16, 16, 0x00000010 /* LR_LOADFROMFILE */);
+                if (File.Exists(path))
+                {
+                    _hIcon = LoadImage(IntPtr.Zero, path, 1 /* IMAGE_ICON */, 16, 16, 0x00000010 /* LR_LOADFROMFILE */);
+                    if (_hIcon != IntPtr.Zero) break;
+                }
+            }
+
+            if (_hIcon == IntPtr.Zero)
+            {
+                string? exePath = Environment.ProcessPath;
+                if (!string.IsNullOrEmpty(exePath) && File.Exists(exePath))
+                {
+                    ExtractIconEx(exePath, 0, out _, out _hIcon, 1);
+                }
+            }
+
+            if (_hIcon == IntPtr.Zero)
+            {
+                _hIcon = LoadIcon(IntPtr.Zero, (IntPtr)32512 /* IDI_APPLICATION */);
             }
         }
         catch { }
+
+        uint flags = NIF_MESSAGE | NIF_TIP;
+        if (_hIcon != IntPtr.Zero)
+        {
+            flags |= NIF_ICON;
+        }
 
         var data = new NOTIFYICONDATA
         {
             cbSize = (uint)Marshal.SizeOf<NOTIFYICONDATA>(),
             hWnd = _hwnd,
             uID = 1001,
-            uFlags = NIF_MESSAGE | NIF_ICON | NIF_TIP,
+            uFlags = flags,
             uCallbackMessage = WM_TRAYICON,
             hIcon = _hIcon,
             szTip = $"{AppSettings.ApplicationName} v{AppSettings.Version}"
@@ -120,12 +156,13 @@ public class TrayIconService : IDisposable
         _isAdded = Shell_NotifyIcon(NIM_ADD, ref data);
         if (_isAdded)
         {
-            _logger.LogInformation("Native Shell_NotifyIcon added successfully");
+            _logger.LogInformation("Native Shell_NotifyIcon added successfully with icon handle {Handle}", _hIcon);
             BuildContextMenu();
         }
         else
         {
-            _logger.LogWarning("Failed to add Shell_NotifyIcon");
+            int err = Marshal.GetLastWin32Error();
+            _logger.LogWarning("Failed to add Shell_NotifyIcon, error code: {Err}, hIcon: {Handle}", err, _hIcon);
         }
     }
 

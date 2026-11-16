@@ -57,6 +57,7 @@ public partial class OverviewViewModel : ObservableObject
 
         UpdateSettingsState();
         _settingsService.SettingsChanged += (s, e) => UpdateSettingsState();
+        _clipboardService.ItemCaptured += item => System.Windows.Application.Current?.Dispatcher.InvokeAsync(() => RefreshAsync());
     }
 
     private void UpdateSettingsState()

@@ -12,6 +12,8 @@ namespace NOVA.Clip.Infrastructure.Clipboard;
 
 public class ClipboardService : IClipboardService
 {
+    public event Action<ClipItem>? ItemCaptured;
+
     private readonly IClipRepository _repository;
     private readonly IDataProtectionService _dataProtection;
     private readonly IPrivacyFilter _privacyFilter;
@@ -78,51 +80,39 @@ public class ClipboardService : IClipboardService
         }
 
         // Read clipboard with bounded retry on STA thread
-        IDataObject? dataObject = await ReadClipboardWithRetryAsync();
-        if (dataObject == null) return null;
+        var snapshot = await ReadClipboardWithRetryAsync();
+        if (snapshot == null) return null;
 
+        ClipItem? item = null;
         try
         {
             // 1. Files format
-            if (settings.CaptureFiles && dataObject.GetDataPresent(DataFormats.FileDrop))
+            if (settings.CaptureFiles && snapshot.Files != null && snapshot.Files.Length > 0)
             {
-                if (dataObject.GetData(DataFormats.FileDrop) is string[] files && files.Length > 0)
-                {
-                    return await ProcessFilesAsync(files, args);
-                }
+                item = await ProcessFilesAsync(snapshot.Files, args);
             }
-
             // 2. Image format
-            if (settings.CaptureImages && dataObject.GetDataPresent(DataFormats.Bitmap))
+            else if (settings.CaptureImages && snapshot.ImageData != null)
             {
-                if (dataObject.GetData(DataFormats.Bitmap) is BitmapSource bitmap)
-                {
-                    return await ProcessImageAsync(bitmap, args);
-                }
+                item = await ProcessImageAsync(snapshot.ImageData, snapshot.ImageWidth, snapshot.ImageHeight, args);
             }
-
             // 3. HTML / RTF Rich text
-            if (settings.CaptureRichText && (dataObject.GetDataPresent(DataFormats.Html) || dataObject.GetDataPresent(DataFormats.Rtf)))
+            else if (settings.CaptureRichText && (snapshot.Html != null || snapshot.Rtf != null))
             {
-                string? html = dataObject.GetDataPresent(DataFormats.Html) ? dataObject.GetData(DataFormats.Html) as string : null;
-                string? rtf = dataObject.GetDataPresent(DataFormats.Rtf) ? dataObject.GetData(DataFormats.Rtf) as string : null;
-                string? plain = dataObject.GetDataPresent(DataFormats.UnicodeText) ? dataObject.GetData(DataFormats.UnicodeText) as string : null;
-
-                if (!string.IsNullOrWhiteSpace(plain) || !string.IsNullOrWhiteSpace(html) || !string.IsNullOrWhiteSpace(rtf))
-                {
-                    return await ProcessRichTextAsync(plain, html, rtf, args);
-                }
+                item = await ProcessRichTextAsync(snapshot.Text, snapshot.Html, snapshot.Rtf, args);
             }
-
             // 4. Plain text / Links
-            if (dataObject.GetDataPresent(DataFormats.UnicodeText))
+            else if (!string.IsNullOrWhiteSpace(snapshot.Text))
             {
-                string? text = dataObject.GetData(DataFormats.UnicodeText) as string;
-                if (!string.IsNullOrWhiteSpace(text))
-                {
-                    return await ProcessTextOrLinkAsync(text, args);
-                }
+                item = await ProcessTextOrLinkAsync(snapshot.Text, args);
             }
+
+            if (item != null)
+            {
+                ItemCaptured?.Invoke(item);
+            }
+
+            return item;
         }
         catch (Exception ex)
         {
@@ -247,13 +237,11 @@ public class ClipboardService : IClipboardService
         return item;
     }
 
-    private async Task<ClipItem?> ProcessImageAsync(BitmapSource bitmap, ClipboardChangedEventArgs args)
+    private async Task<ClipItem?> ProcessImageAsync(byte[] pngBytes, int width, int height, ClipboardChangedEventArgs args)
     {
         var settings = _settingsService.Settings;
         if (!settings.CaptureImages) return null;
 
-        // Encode to PNG bytes
-        byte[] pngBytes = EncodeToPng(bitmap);
         string hash = ComputeHash(pngBytes);
 
         if (settings.DuplicateDetectionEnabled)
@@ -270,8 +258,8 @@ public class ClipboardService : IClipboardService
         var payload = new PayloadData
         {
             ImageData = pngBytes,
-            ImageWidth = bitmap.PixelWidth,
-            ImageHeight = bitmap.PixelHeight
+            ImageWidth = width,
+            ImageHeight = height
         };
 
         byte[] payloadBytes = PayloadData.Serialize(payload);
@@ -285,9 +273,9 @@ public class ClipboardService : IClipboardService
         {
             Id = itemId,
             Type = ClipContentType.Image,
-            Title = $"Image ({bitmap.PixelWidth}x{bitmap.PixelHeight})",
-            PreviewText = $"PNG image - {bitmap.PixelWidth} × {bitmap.PixelHeight} pixels",
-            SecondaryInfo = $"{bitmap.PixelWidth} × {bitmap.PixelHeight} • {pngBytes.Length / 1024} KB",
+            Title = $"Image ({width}x{height})",
+            PreviewText = $"PNG image - {width} × {height} pixels",
+            SecondaryInfo = $"{width} × {height} • {pngBytes.Length / 1024} KB",
             SourceApplication = args.ProcessName,
             SourceWindowTitle = args.WindowTitle,
             CreatedAt = DateTime.UtcNow,
@@ -336,13 +324,29 @@ public class ClipboardService : IClipboardService
         string preview = string.Join(Environment.NewLine, files.Take(4));
         if (files.Length > 4) preview += $"{Environment.NewLine}... (+{files.Length - 4} more)";
 
+        string secondary = $"{files.Length} file references";
+        if (files.Length == 1 && File.Exists(files[0]))
+        {
+            try
+            {
+                var fi = new FileInfo(files[0]);
+                string ext = fi.Extension.ToLowerInvariant();
+                long size = fi.Length;
+                string sizeStr = size > 1024 * 1024
+                    ? $"{size / (1024.0 * 1024.0):F1} MB"
+                    : $"{Math.Max(1, size / 1024)} KB";
+                secondary = $"{sizeStr} • {ext}";
+            }
+            catch { }
+        }
+
         var item = new ClipItem
         {
             Id = Guid.NewGuid(),
             Type = ClipContentType.Files,
             Title = title,
             PreviewText = preview,
-            SecondaryInfo = files.Length == 1 ? "1 file reference" : $"{files.Length} file references",
+            SecondaryInfo = secondary,
             SourceApplication = args.ProcessName,
             SourceWindowTitle = args.WindowTitle,
             CreatedAt = DateTime.UtcNow,
@@ -353,6 +357,38 @@ public class ClipboardService : IClipboardService
         };
 
         await _repository.AddItemAsync(item);
+        return item;
+    }
+
+    public async Task<ClipItem?> IngestTextAsync(string text, string sourceApp)
+    {
+        var args = new ClipboardChangedEventArgs
+        {
+            ProcessName = sourceApp,
+            WindowTitle = "Phone Sync"
+        };
+        var item = await ProcessTextOrLinkAsync(text, args);
+        if (item != null)
+        {
+            ItemCaptured?.Invoke(item);
+            _ = RestoreToClipboardAsync(item);
+        }
+        return item;
+    }
+
+    public async Task<ClipItem?> IngestFilesAsync(string[] filePaths, string sourceApp)
+    {
+        var args = new ClipboardChangedEventArgs
+        {
+            ProcessName = sourceApp,
+            WindowTitle = "Phone Sync"
+        };
+        var item = await ProcessFilesAsync(filePaths, args);
+        if (item != null)
+        {
+            ItemCaptured?.Invoke(item);
+            _ = RestoreToClipboardAsync(item);
+        }
         return item;
     }
 
@@ -488,26 +524,77 @@ public class ClipboardService : IClipboardService
         }
     }
 
-    private static async Task<IDataObject?> ReadClipboardWithRetryAsync()
+    private sealed record ClipboardSnapshot(
+        string[]? Files,
+        byte[]? ImageData,
+        int ImageWidth,
+        int ImageHeight,
+        string? Html,
+        string? Rtf,
+        string? Text
+    );
+
+    private static async Task<ClipboardSnapshot?> ReadClipboardWithRetryAsync()
     {
         for (int i = 0; i < 5; i++)
         {
             try
             {
-                IDataObject? obj = null;
+                ClipboardSnapshot? snapshot = null;
                 var t = new Thread(() =>
                 {
                     try
                     {
-                        obj = System.Windows.Clipboard.GetDataObject();
+                        var obj = System.Windows.Clipboard.GetDataObject();
+                        if (obj == null) return;
+
+                        string[]? files = null;
+                        try
+                        {
+                            if (obj.GetDataPresent(DataFormats.FileDrop))
+                            {
+                                files = obj.GetData(DataFormats.FileDrop) as string[];
+                            }
+                        }
+                        catch { }
+
+                        byte[]? imgBytes = null;
+                        int imgW = 0, imgH = 0;
+                        try
+                        {
+                            if (obj.GetDataPresent(DataFormats.Bitmap))
+                            {
+                                if (obj.GetData(DataFormats.Bitmap) is BitmapSource bmp)
+                                {
+                                    imgW = bmp.PixelWidth;
+                                    imgH = bmp.PixelHeight;
+                                    imgBytes = EncodeToPng(bmp);
+                                }
+                            }
+                        }
+                        catch { }
+
+                        string? html = null;
+                        try { html = obj.GetDataPresent(DataFormats.Html) ? obj.GetData(DataFormats.Html) as string : null; } catch { }
+
+                        string? rtf = null;
+                        try { rtf = obj.GetDataPresent(DataFormats.Rtf) ? obj.GetData(DataFormats.Rtf) as string : null; } catch { }
+
+                        string? text = null;
+                        try { text = obj.GetDataPresent(DataFormats.UnicodeText) ? obj.GetData(DataFormats.UnicodeText) as string : null; } catch { }
+
+                        if ((files != null && files.Length > 0) || imgBytes != null || html != null || rtf != null || !string.IsNullOrEmpty(text))
+                        {
+                            snapshot = new ClipboardSnapshot(files, imgBytes, imgW, imgH, html, rtf, text);
+                        }
                     }
                     catch { }
                 });
                 t.SetApartmentState(ApartmentState.STA);
                 t.Start();
-                t.Join(300);
+                t.Join(400);
 
-                if (obj != null) return obj;
+                if (snapshot != null) return snapshot;
             }
             catch { }
 

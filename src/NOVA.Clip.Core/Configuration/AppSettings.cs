@@ -3,14 +3,14 @@ namespace NOVA.Clip.Core.Configuration;
 public class AppSettings
 {
     // General
-    public bool StartWithWindows { get; set; } = false;
+    public bool StartWithWindows { get; set; } = true;
     public bool MinimizeToTray { get; set; } = true;
     public bool CloseToTray { get; set; } = true;
     public bool LaunchFloatingPanelAtStartup { get; set; } = false;
     public string DefaultView { get; set; } = "Overview";
 
     // Appearance
-    public string ThemeMode { get; set; } = "System"; // "System", "Dark", "Light"
+    public string ThemeMode { get; set; } = "Light"; // "System", "Dark", "Light"
     public string AccentColor { get; set; } = "#2563EB";
     public double FloatingPanelOpacity { get; set; } = 0.98;
     public double FloatingPanelWidth { get; set; } = 380;

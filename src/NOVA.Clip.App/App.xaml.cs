@@ -13,6 +13,7 @@ using NOVA.Clip.Infrastructure.Database;
 using NOVA.Clip.Infrastructure.Security;
 using NOVA.Clip.Infrastructure.Storage;
 using NOVA.Clip.Infrastructure.Windows;
+using NOVA.Clip.Infrastructure.Network;
 
 namespace NOVA.Clip.App;
 
@@ -27,6 +28,7 @@ public partial class App : Application
     private IInputSimulator? _inputSimulator;
     private ISettingsService? _settingsService;
     private IThemeService? _themeService;
+    private IPhoneSyncServer? _phoneSyncServer;
 
     private HwndSource? _messageHwndSource;
     private MainWindow? _mainWindow;
@@ -36,6 +38,28 @@ public partial class App : Application
     protected override async void OnStartup(StartupEventArgs e)
     {
         base.OnStartup(e);
+
+        AppDomain.CurrentDomain.UnhandledException += (s, args) =>
+        {
+            try
+            {
+                string dir = System.IO.Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "NOVA.Clip");
+                System.IO.Directory.CreateDirectory(dir);
+                System.IO.File.AppendAllText(System.IO.Path.Combine(dir, "crash.log"), $"[{DateTime.UtcNow:O}] AppDomain Unhandled: {args.ExceptionObject}\n");
+            }
+            catch { }
+        };
+
+        DispatcherUnhandledException += (s, args) =>
+        {
+            try
+            {
+                string dir = System.IO.Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "NOVA.Clip");
+                System.IO.Directory.CreateDirectory(dir);
+                System.IO.File.AppendAllText(System.IO.Path.Combine(dir, "crash.log"), $"[{DateTime.UtcNow:O}] Dispatcher Unhandled: {args.Exception}\n");
+            }
+            catch { }
+        };
 
         // 1. Dependency Injection setup
         var services = new ServiceCollection();
@@ -62,10 +86,24 @@ public partial class App : Application
         _themeService = ServiceProvider.GetRequiredService<IThemeService>();
         _themeService.ApplyTheme(_settingsService.Settings.ThemeMode);
 
-        // 4. Create hidden message window for clipboard notifications & hotkeys
+        // 4. Auto-startup: sync registry to current setting (default = enabled)
+        // Only register startup when running as a published .exe (not via `dotnet run`)
+        string exePath = Environment.ProcessPath
+            ?? System.Reflection.Assembly.GetExecutingAssembly().Location;
+        bool isPublishedExe = exePath.EndsWith("NOVA.Clip.App.exe", StringComparison.OrdinalIgnoreCase);
+        if (isPublishedExe)
+        {
+            StartupService.SyncToSetting(_settingsService.Settings.StartWithWindows, exePath);
+
+            // Wire setting changes so toggling in Settings UI updates the registry live
+            _settingsService.SettingsChanged += (_, settings) =>
+                StartupService.SyncToSetting(settings.StartWithWindows, exePath);
+        }
+
+        // 5. Create hidden message window for clipboard notifications & hotkeys
         CreateMessageWindow();
 
-        // 5. Initialize Tray Icon
+        // 6. Initialize Tray Icon
         _trayIconService = ServiceProvider.GetRequiredService<TrayIconService>();
         if (_messageHwndSource != null)
         {
@@ -74,6 +112,31 @@ public partial class App : Application
         _trayIconService.OpenMainAppRequested += (s, args) => ShowMainWindow();
         _trayIconService.OpenFloatingPanelRequested += (s, args) => ToggleFloatingPanel();
         _trayIconService.ExitRequested += (s, args) => ShutdownApp();
+
+        // 5b. Start Phone Sync Server (Local Wi-Fi Receiver)
+        _phoneSyncServer = ServiceProvider.GetRequiredService<IPhoneSyncServer>();
+        var clipService = ServiceProvider.GetRequiredService<IClipboardService>();
+
+        _phoneSyncServer.TextReceived += async (text, source) =>
+        {
+            await clipService.IngestTextAsync(text, source);
+            Dispatcher.Invoke(() =>
+            {
+                string snippet = text.Length > 35 ? text[..35] + "..." : text;
+                _trayIconService?.ShowNotification("Phone Sync", $"Received from phone: {snippet}");
+            });
+        };
+
+        _phoneSyncServer.FileReceived += async (filePath) =>
+        {
+            await clipService.IngestFilesAsync([filePath], "iPhone");
+            Dispatcher.Invoke(() =>
+            {
+                _trayIconService?.ShowNotification("Phone Sync", $"Received file: {System.IO.Path.GetFileName(filePath)}");
+            });
+        };
+
+        _phoneSyncServer.Start();
 
         // 6. Initialize Windows & ViewModels
         var mainVm = ServiceProvider.GetRequiredService<MainViewModel>();
@@ -124,6 +187,7 @@ public partial class App : Application
         services.AddSingleton<IHotKeyService, HotKeyService>();
         services.AddSingleton<IInputSimulator, WindowsInputSimulator>();
         services.AddSingleton<IThemeService, ThemeService>();
+        services.AddSingleton<IPhoneSyncServer, PhoneSyncServer>();
 
         // App Services
         services.AddSingleton<SingleInstanceService>();
@@ -147,7 +211,8 @@ public partial class App : Application
             sp.GetRequiredService<IInputSimulator>(),
             () => ShowMainWindow(),
             card => _ = sp.GetRequiredService<PasteQueueViewModel>().AddItemToQueueAsync(card.Model),
-            () => { ShowMainWindow(); sp.GetRequiredService<MainViewModel>().Navigate("Settings"); }));
+            () => { ShowMainWindow(); sp.GetRequiredService<MainViewModel>().Navigate("Settings"); },
+            sp.GetService<IPhoneSyncServer>()));
 
         services.AddSingleton<MainViewModel>();
     }
@@ -167,6 +232,18 @@ public partial class App : Application
         _messageHwndSource.AddHook(HwndMessageHook);
 
         _clipboardMonitor = ServiceProvider?.GetRequiredService<IClipboardMonitor>();
+        var clipboardService = ServiceProvider?.GetRequiredService<IClipboardService>();
+        if (_clipboardMonitor != null && clipboardService != null)
+        {
+            _clipboardMonitor.ClipboardChanged += async (s, args) =>
+            {
+                try
+                {
+                    await clipboardService.ProcessClipboardChangeAsync(args);
+                }
+                catch { }
+            };
+        }
         _clipboardMonitor?.Start(_messageHwndSource.Handle);
 
         _inputSimulator = ServiceProvider?.GetRequiredService<IInputSimulator>();
@@ -292,6 +369,7 @@ public partial class App : Application
 
     private void ShutdownApp()
     {
+        _phoneSyncServer?.Dispose();
         _hotKeyService?.UnregisterAll();
         _clipboardMonitor?.Stop();
         _trayIconService?.Dispose();

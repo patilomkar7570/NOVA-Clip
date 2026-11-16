@@ -1,9 +1,15 @@
+using System.IO;
 using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Input;
+using System.Windows.Media;
+using System.Windows.Media.Imaging;
+using System.Windows.Shapes;
+using Microsoft.Extensions.DependencyInjection;
 using NOVA.Clip.App.ViewModels;
 using NOVA.Clip.Core.Configuration;
-using NOVA.Clip.Infrastructure.Windows;
+using NOVA.Clip.Core.Interfaces;
+using NOVA.Clip.Core.Models;
 
 namespace NOVA.Clip.App.Views;
 
@@ -12,6 +18,10 @@ public partial class FloatingPanelWindow : Window
     private readonly FloatingPanelViewModel _viewModel;
     private readonly AppSettings _settings;
     private IntPtr _targetWindowHwnd = IntPtr.Zero;
+
+    private Point _dragStartPoint;
+    private ItemCardViewModel? _draggedCard;
+    private bool _hasDragged;
 
     public FloatingPanelWindow(FloatingPanelViewModel viewModel, AppSettings settings)
     {
@@ -39,50 +49,109 @@ public partial class FloatingPanelWindow : Window
         Activate();
 
         _ = _viewModel.LoadItemsAsync();
-        SearchBox.Focus();
-        SearchBox.SelectAll();
     }
 
     private void RestoreWindowPosition()
     {
-        double width = _settings.FloatingPanelWidth > 200 ? _settings.FloatingPanelWidth : 380;
-        double height = _settings.FloatingPanelHeight > 300 ? _settings.FloatingPanelHeight : 520;
-        Width = width;
-        Height = height;
-        Opacity = _settings.FloatingPanelOpacity;
-
-        if (_settings.FloatingPanelLeft > 0 && _settings.FloatingPanelTop > 0)
-        {
-            Left = _settings.FloatingPanelLeft;
-            Top = _settings.FloatingPanelTop;
-        }
-        else
-        {
-            // Center in screen
-            var workArea = SystemParameters.WorkArea;
-            Left = workArea.Left + (workArea.Width - Width) / 2;
-            Top = workArea.Top + (workArea.Height - Height) / 2;
-        }
-
-        EnsureVisibleOnScreen();
-    }
-
-    private void EnsureVisibleOnScreen()
-    {
         var workArea = SystemParameters.WorkArea;
-        if (Left < workArea.Left) Left = workArea.Left + 10;
-        if (Top < workArea.Top) Top = workArea.Top + 10;
-        if (Left + Width > workArea.Right) Left = workArea.Right - Width - 10;
-        if (Top + Height > workArea.Bottom) Top = workArea.Bottom - Height - 10;
+
+        // Cover ~40% of the screen width, centered horizontally
+        double targetWidth = Math.Round(Math.Clamp(workArea.Width * 0.40, 640, 940));
+        Width = targetWidth;
+        Height = 68;
+        Opacity = 0.98;
+
+        // Position directly at the top center, right below the camera notch
+        Left = workArea.Left + (workArea.Width - Width) / 2.0;
+        Top = workArea.Top + 8;
     }
 
-    private void Header_MouseLeftButtonDown(object sender, MouseButtonEventArgs e)
+    private void Island_MouseLeftButtonDown(object sender, MouseButtonEventArgs e)
+    {
+        if (e.LeftButton == MouseButtonState.Pressed && e.OriginalSource is not Button && e.OriginalSource is not System.Windows.Shapes.Path)
+        {
+            try
+            {
+                DragMove();
+            }
+            catch { }
+        }
+    }
+
+    private void Slot_PreviewMouseDown(object sender, MouseButtonEventArgs e)
     {
         if (e.LeftButton == MouseButtonState.Pressed)
         {
-            DragMove();
-            _settings.FloatingPanelLeft = Left;
-            _settings.FloatingPanelTop = Top;
+            _dragStartPoint = e.GetPosition(null);
+            _draggedCard = (sender as FrameworkElement)?.DataContext as ItemCardViewModel;
+            _hasDragged = false;
+        }
+    }
+
+    private async void Slot_PreviewMouseMove(object sender, MouseEventArgs e)
+    {
+        if (e.LeftButton == MouseButtonState.Pressed && _draggedCard != null && !_draggedCard.IsEmptySlot && !_hasDragged)
+        {
+            Point currentPoint = e.GetPosition(null);
+            Vector diff = _dragStartPoint - currentPoint;
+
+            if (Math.Abs(diff.X) > SystemParameters.MinimumHorizontalDragDistance ||
+                Math.Abs(diff.Y) > SystemParameters.MinimumVerticalDragDistance)
+            {
+                _hasDragged = true;
+
+                var clipboardService = App.ServiceProvider?.GetService<IClipboardService>();
+                if (clipboardService == null) return;
+
+                var payload = await clipboardService.GetPayloadAsync(_draggedCard.Model);
+                if (payload == null) return;
+
+                var dataObj = new System.Windows.DataObject();
+
+                switch (_draggedCard.Type)
+                {
+                    case ClipContentType.Files:
+                        if (payload.FilePaths != null && payload.FilePaths.Length > 0)
+                        {
+                            var collection = new System.Collections.Specialized.StringCollection();
+                            collection.AddRange(payload.FilePaths);
+                            dataObj.SetFileDropList(collection);
+                        }
+                        break;
+
+                    case ClipContentType.Image:
+                        if (!string.IsNullOrEmpty(_draggedCard.StorageAssetPath) && File.Exists(_draggedCard.StorageAssetPath))
+                        {
+                            try
+                            {
+                                var bmp = new BitmapImage(new Uri(_draggedCard.StorageAssetPath));
+                                dataObj.SetImage(bmp);
+                            }
+                            catch { }
+                        }
+                        break;
+
+                    default:
+                        if (!string.IsNullOrEmpty(payload.PlainText))
+                        {
+                            dataObj.SetText(payload.PlainText);
+                        }
+                        break;
+                }
+
+                if (sender is DependencyObject dragSource)
+                {
+                    DragDrop.DoDragDrop(dragSource, dataObj, DragDropEffects.Copy);
+                }
+            }
+        }
+    }
+
+    private void Slot_MouseLeftButtonUp(object sender, MouseButtonEventArgs e)
+    {
+        if (!_hasDragged && _draggedCard != null && !_draggedCard.IsEmptySlot)
+        {
+            _ = _viewModel.SlotClickedAsync(_draggedCard);
         }
     }
 
@@ -91,53 +160,38 @@ public partial class FloatingPanelWindow : Window
         Hide();
     }
 
-    private void FilterChip_Click(object sender, RoutedEventArgs e)
-    {
-        if (sender is RadioButton rb && rb.Tag is string filter)
-        {
-            _viewModel.SelectedFilter = filter;
-        }
-    }
-
     private void Window_KeyDown(object sender, KeyEventArgs e)
     {
         if (e.Key == Key.Escape)
         {
             Hide();
             e.Handled = true;
+            return;
         }
-        else if (e.Key == Key.Up)
+
+        // Quick numeric slot triggers: 1, 2, 3, 4
+        int slotIndex = e.Key switch
         {
-            _viewModel.MoveSelectionUp();
-            ItemsListBox.ScrollIntoView(_viewModel.SelectedItem);
-            e.Handled = true;
-        }
-        else if (e.Key == Key.Down)
+            Key.D1 or Key.NumPad1 => 0,
+            Key.D2 or Key.NumPad2 => 1,
+            Key.D3 or Key.NumPad3 => 2,
+            Key.D4 or Key.NumPad4 => 3,
+            _ => -1
+        };
+
+        if (slotIndex >= 0 && slotIndex < _viewModel.RecentSlots.Count)
         {
-            _viewModel.MoveSelectionDown();
-            ItemsListBox.ScrollIntoView(_viewModel.SelectedItem);
-            e.Handled = true;
-        }
-        else if (e.Key == Key.Enter)
-        {
-            if (_viewModel.SelectedItem != null)
+            var card = _viewModel.RecentSlots[slotIndex];
+            if (!card.IsEmptySlot)
             {
-                _ = _viewModel.PasteItemAsync(_viewModel.SelectedItem, _targetWindowHwnd);
+                _ = _viewModel.SlotClickedAsync(card);
+                e.Handled = true;
             }
-            e.Handled = true;
         }
     }
 
     private void Window_Deactivated(object sender, EventArgs e)
     {
         Hide();
-    }
-
-    private void ItemsListBox_MouseDoubleClick(object sender, MouseButtonEventArgs e)
-    {
-        if (_viewModel.SelectedItem != null)
-        {
-            _ = _viewModel.PasteItemAsync(_viewModel.SelectedItem, _targetWindowHwnd);
-        }
     }
 }

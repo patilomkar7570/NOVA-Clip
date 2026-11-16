@@ -41,6 +41,7 @@ public partial class ClipboardListViewModel : ObservableObject
     {
         _repository = repository;
         _clipboardService = clipboardService;
+        _clipboardService.ItemCaptured += item => System.Windows.Application.Current?.Dispatcher.InvokeAsync(() => LoadItemsAsync());
     }
 
     public async Task InitializeAsync(string title, ClipContentType? type = null, bool favoritesOnly = false)

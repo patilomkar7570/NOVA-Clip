@@ -32,6 +32,15 @@ public partial class ItemCardViewModel : ObservableObject
     [ObservableProperty]
     private bool _isSelected;
 
+    [ObservableProperty]
+    private bool _isCopied;
+
+    [ObservableProperty]
+    private bool _isEmptySlot;
+
+    [ObservableProperty]
+    private int _slotNumber;
+
     public ClipItem Model => _model;
     public Guid Id => _model.Id;
     public ClipContentType Type => _model.Type;
@@ -40,6 +49,72 @@ public partial class ItemCardViewModel : ObservableObject
     public DateTime CreatedAt => _model.CreatedAt;
     public long ByteSize => _model.ByteSize;
     public string? StorageAssetPath => _model.StorageAssetPath;
+
+    public string TypeLabel => Type switch
+    {
+        ClipContentType.Link => "LINK",
+        ClipContentType.Files => "FILE",
+        ClipContentType.Image => "IMG",
+        ClipContentType.RichText => "RICH",
+        _ => "TEXT"
+    };
+
+    public string TypeColorHex => Type switch
+    {
+        ClipContentType.Link => "#3B82F6",
+        ClipContentType.Files => "#10B981",
+        ClipContentType.Image => "#A855F7",
+        ClipContentType.RichText => "#EC4899",
+        _ => "#60A5FA"
+    };
+
+    public string TypeBgHex => Type switch
+    {
+        ClipContentType.Link => "#1E293B",
+        ClipContentType.Files => "#064E3B",
+        ClipContentType.Image => "#3B0764",
+        ClipContentType.RichText => "#500724",
+        _ => "#1E293B"
+    };
+
+    public string TypeIconKey => Type switch
+    {
+        ClipContentType.Link => "IconLink",
+        ClipContentType.Files => "IconFiles",
+        ClipContentType.Image => "IconImage",
+        ClipContentType.RichText => "IconRichText",
+        _ => "IconText"
+    };
+
+    public bool HasContent => !IsEmptySlot;
+
+    public System.Windows.Media.Brush TypeBrush
+    {
+        get
+        {
+            try
+            {
+                return (System.Windows.Media.Brush)new System.Windows.Media.BrushConverter().ConvertFromString(TypeColorHex)!;
+            }
+            catch
+            {
+                return System.Windows.Media.Brushes.DodgerBlue;
+            }
+        }
+    }
+
+    public System.Windows.Media.Geometry? TypeIconGeometry
+    {
+        get
+        {
+            if (System.Windows.Application.Current != null &&
+                System.Windows.Application.Current.TryFindResource(TypeIconKey) is System.Windows.Media.Geometry geo)
+            {
+                return geo;
+            }
+            return null;
+        }
+    }
 
     public string FriendlyTime => FormatFriendlyTime(_model.LastUsedAt);
 
@@ -117,6 +192,26 @@ public partial class ItemCardViewModel : ObservableObject
         Title = newTitle.Trim();
         _model.Title = Title;
         return await _repository.UpdateItemAsync(_model);
+    }
+
+    public static ItemCardViewModel CreateEmptySlot(int slotNumber)
+    {
+        var dummy = new ClipItem
+        {
+            Id = Guid.Empty,
+            Type = ClipContentType.Text,
+            Title = "Empty slot",
+            PreviewText = "Copy something",
+            SecondaryInfo = $"Slot {slotNumber}",
+            CreatedAt = DateTime.UtcNow,
+            LastUsedAt = DateTime.UtcNow
+        };
+
+        return new ItemCardViewModel(dummy, null!, null!)
+        {
+            IsEmptySlot = true,
+            SlotNumber = slotNumber
+        };
     }
 
     private static string FormatFriendlyTime(DateTime time)

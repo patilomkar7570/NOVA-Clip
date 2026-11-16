@@ -14,6 +14,10 @@ public partial class FloatingPanelViewModel : ObservableObject
     private readonly Action _openMainWindow;
     private readonly Action<ItemCardViewModel> _addToQueue;
     private readonly Action _openSettings;
+    private readonly IPhoneSyncServer? _phoneSyncServer;
+
+    public string PhoneSyncUrl => _phoneSyncServer?.ServerUrl ?? "http://localhost:5892";
+    public string PhoneSyncHint => $"Open on phone: {PhoneSyncUrl}";
 
     [ObservableProperty]
     private string _searchQuery = string.Empty;
@@ -31,6 +35,7 @@ public partial class FloatingPanelViewModel : ObservableObject
     private bool _isLoading;
 
     public ObservableCollection<ItemCardViewModel> Items { get; } = [];
+    public ObservableCollection<ItemCardViewModel> RecentSlots { get; } = [];
 
     public event Action? CloseRequested;
     public event Action<string, string>? NotificationRequested;
@@ -41,7 +46,8 @@ public partial class FloatingPanelViewModel : ObservableObject
         IInputSimulator inputSimulator,
         Action openMainWindow,
         Action<ItemCardViewModel> addToQueue,
-        Action openSettings)
+        Action openSettings,
+        IPhoneSyncServer? phoneSyncServer = null)
     {
         _repository = repository;
         _clipboardService = clipboardService;
@@ -49,6 +55,8 @@ public partial class FloatingPanelViewModel : ObservableObject
         _openMainWindow = openMainWindow;
         _addToQueue = addToQueue;
         _openSettings = openSettings;
+        _phoneSyncServer = phoneSyncServer;
+        _clipboardService.ItemCaptured += item => System.Windows.Application.Current?.Dispatcher.InvokeAsync(() => LoadItemsAsync());
     }
 
     partial void OnSearchQueryChanged(string value)
@@ -116,6 +124,22 @@ public partial class FloatingPanelViewModel : ObservableObject
                     onViewDetails: null));
             }
 
+            RecentSlots.Clear();
+            for (int i = 0; i < 4; i++)
+            {
+                if (i < Items.Count)
+                {
+                    var card = Items[i];
+                    card.SlotNumber = i + 1;
+                    card.IsEmptySlot = false;
+                    RecentSlots.Add(card);
+                }
+                else
+                {
+                    RecentSlots.Add(ItemCardViewModel.CreateEmptySlot(i + 1));
+                }
+            }
+
             if (Items.Count > 0)
             {
                 SelectedIndex = 0;
@@ -130,6 +154,23 @@ public partial class FloatingPanelViewModel : ObservableObject
         finally
         {
             IsLoading = false;
+        }
+    }
+
+    [RelayCommand]
+    public async Task SlotClickedAsync(ItemCardViewModel? card)
+    {
+        if (card == null || card.IsEmptySlot) return;
+
+        bool copied = await _clipboardService.RestoreToClipboardAsync(card.Model);
+        if (copied)
+        {
+            await _repository.UpdateLastUsedAsync(card.Id);
+            card.IsCopied = true;
+            await Task.Delay(350);
+            card.IsCopied = false;
+            CloseRequested?.Invoke();
+            NotificationRequested?.Invoke("Copied", card.Title);
         }
     }
 
@@ -200,6 +241,23 @@ public partial class FloatingPanelViewModel : ObservableObject
     {
         CloseRequested?.Invoke();
         _openMainWindow();
+    }
+
+    [RelayCommand]
+    public void OpenPhoneSync()
+    {
+        try
+        {
+            var psi = new System.Diagnostics.ProcessStartInfo
+            {
+                FileName = PhoneSyncUrl,
+                UseShellExecute = true
+            };
+            System.Diagnostics.Process.Start(psi);
+        }
+        catch { }
+
+        NotificationRequested?.Invoke("Phone Sync", $"Open on your phone: {PhoneSyncUrl}");
     }
 
     [RelayCommand]
