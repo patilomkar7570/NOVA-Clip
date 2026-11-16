@@ -369,6 +369,9 @@ public partial class App : Application
 
     private void ShutdownApp()
     {
+        string dir = System.IO.Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "NOVA.Clip");
+        try { System.IO.File.AppendAllText(System.IO.Path.Combine(dir, "startup.log"), $"[{DateTime.UtcNow:O}] ShutdownApp called! StackTrace:\n{Environment.StackTrace}\n"); } catch { }
+
         _phoneSyncServer?.Dispose();
         _hotKeyService?.UnregisterAll();
         _clipboardMonitor?.Stop();
