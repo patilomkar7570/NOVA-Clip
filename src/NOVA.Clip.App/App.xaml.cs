@@ -7,6 +7,7 @@ using NOVA.Clip.App.ViewModels;
 using NOVA.Clip.App.Views;
 using NOVA.Clip.Core.Configuration;
 using NOVA.Clip.Core.Interfaces;
+using NOVA.Clip.Core.Models;
 using NOVA.Clip.Infrastructure.Clipboard;
 using NOVA.Clip.Infrastructure.Configuration;
 using NOVA.Clip.Infrastructure.Database;
@@ -136,7 +137,34 @@ public partial class App : Application
             });
         };
 
+        // Two-Way Sync: Automatically forward PC clipboard captures to Phone Sync
+        clipService.ItemCaptured += (item) =>
+        {
+            if (item.Type == ClipContentType.Text || item.Type == ClipContentType.Link)
+            {
+                if (!string.Equals(item.SourceApplication, "iPhone", StringComparison.OrdinalIgnoreCase))
+                {
+                    _phoneSyncServer?.PushTextFromPc(item.Title, item.Type.ToString(), item.SourceApplication ?? "PC");
+                }
+            }
+        };
+
         _phoneSyncServer.Start();
+
+        // Seed recent clips from repository to Phone Sync
+        var clipRepo = ServiceProvider.GetRequiredService<IClipRepository>();
+        _ = Task.Run(async () =>
+        {
+            try
+            {
+                var recents = await clipRepo.GetAllItemsAsync(limit: 5);
+                foreach (var clip in recents.Where(c => c.Type == ClipContentType.Text || c.Type == ClipContentType.Link).Reverse())
+                {
+                    _phoneSyncServer?.PushTextFromPc(clip.Title, clip.Type.ToString(), clip.SourceApplication ?? "PC");
+                }
+            }
+            catch { }
+        });
 
         // 6. Initialize Windows & ViewModels
         var mainVm = ServiceProvider.GetRequiredService<MainViewModel>();

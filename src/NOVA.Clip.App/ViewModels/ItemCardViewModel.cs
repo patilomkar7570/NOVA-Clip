@@ -13,6 +13,7 @@ public partial class ItemCardViewModel : ObservableObject
     private readonly Action<ItemCardViewModel>? _onDeleted;
     private readonly Action<ItemCardViewModel>? _onAddToQueue;
     private readonly Action<ItemCardViewModel>? _onViewDetails;
+    private readonly IPhoneSyncServer? _phoneSyncServer;
 
     [ObservableProperty]
     private string _title;
@@ -124,7 +125,8 @@ public partial class ItemCardViewModel : ObservableObject
         IClipRepository repository,
         Action<ItemCardViewModel>? onDeleted = null,
         Action<ItemCardViewModel>? onAddToQueue = null,
-        Action<ItemCardViewModel>? onViewDetails = null)
+        Action<ItemCardViewModel>? onViewDetails = null,
+        IPhoneSyncServer? phoneSyncServer = null)
     {
         _model = model;
         _clipboardService = clipboardService;
@@ -132,12 +134,25 @@ public partial class ItemCardViewModel : ObservableObject
         _onDeleted = onDeleted;
         _onAddToQueue = onAddToQueue;
         _onViewDetails = onViewDetails;
+        _phoneSyncServer = phoneSyncServer;
 
         _title = model.Title;
         _previewText = model.PreviewText;
         _secondaryInfo = model.SecondaryInfo;
         _isFavorite = model.IsFavorite;
         _lastUsedAt = model.LastUsedAt;
+    }
+
+    [RelayCommand]
+    public void SendToPhone()
+    {
+        string text = !string.IsNullOrWhiteSpace(_model.Title) ? _model.Title : (_model.PreviewText ?? string.Empty);
+        if (!string.IsNullOrWhiteSpace(text))
+        {
+            _phoneSyncServer?.PushTextFromPc(text, TypeLabel, "Top Island");
+            IsCopied = true;
+            Task.Delay(1200).ContinueWith(_ => IsCopied = false);
+        }
     }
 
     [RelayCommand]

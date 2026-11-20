@@ -106,6 +106,13 @@
                                 PreviewMouseDown="Slot_PreviewMouseDown"
                                 PreviewMouseMove="Slot_PreviewMouseMove"
                                 MouseLeftButtonUp="Slot_MouseLeftButtonUp">
+                            <Border.ContextMenu>
+                                <ContextMenu Background="#1E293B" BorderBrush="#334155" Foreground="White">
+                                    <MenuItem Header="📱 Send to iPhone" Command="{Binding SendToPhoneCommand}" />
+                                    <MenuItem Header="📋 Copy to Clipboard" Command="{Binding CopyCommand}" />
+                                    <MenuItem Header="⭐ Star / Favorite" Command="{Binding ToggleFavoriteCommand}" />
+                                </ContextMenu>
+                            </Border.ContextMenu>
                             <Border.Style>
                                 <Style TargetType="Border">
                                     <Style.Triggers>

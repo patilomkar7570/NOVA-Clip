@@ -121,7 +121,8 @@ public partial class FloatingPanelViewModel : ObservableObject
                     _repository,
                     onDeleted: card => Items.Remove(card),
                     onAddToQueue: card => _addToQueue(card),
-                    onViewDetails: null));
+                    onViewDetails: null,
+                    phoneSyncServer: _phoneSyncServer));
             }
 
             RecentSlots.Clear();
@@ -167,6 +168,7 @@ public partial class FloatingPanelViewModel : ObservableObject
         {
             await _repository.UpdateLastUsedAsync(card.Id);
             card.IsCopied = true;
+            _phoneSyncServer?.PushTextFromPc(card.Title, card.TypeLabel, "Top Island");
             await Task.Delay(350);
             card.IsCopied = false;
             CloseRequested?.Invoke();
@@ -246,6 +248,11 @@ public partial class FloatingPanelViewModel : ObservableObject
     [RelayCommand]
     public void OpenPhoneSync()
     {
+        if (RecentSlots.Count > 0 && !RecentSlots[0].IsEmptySlot && !string.IsNullOrWhiteSpace(RecentSlots[0].Title))
+        {
+            _phoneSyncServer?.PushTextFromPc(RecentSlots[0].Title, RecentSlots[0].TypeLabel, "Top Island");
+        }
+
         try
         {
             var psi = new System.Diagnostics.ProcessStartInfo
@@ -257,7 +264,7 @@ public partial class FloatingPanelViewModel : ObservableObject
         }
         catch { }
 
-        NotificationRequested?.Invoke("Phone Sync", $"Open on your phone: {PhoneSyncUrl}");
+        NotificationRequested?.Invoke("Phone Sync", $"Two-Way Sync active! Open on phone: {PhoneSyncUrl}");
     }
 
     [RelayCommand]

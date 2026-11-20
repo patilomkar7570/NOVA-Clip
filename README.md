@@ -48,8 +48,13 @@ Every item stored on disk is encrypted using native **Windows DPAPI** (`CurrentU
 
 ---
 
-### 2. 📱 Phone-to-PC Local Sync (Cross-Device Clipboard)
-Send links, text snippets, and files from your iPhone, Android, iPad, or laptop straight into your Windows PC clipboard in real time!
+### 2. 📱 Two-Way Phone ⇄ PC Local Sync (Cross-Device Clipboard)
+Seamlessly sync links, text snippets, and files in **both directions** between your iPhone/Android device and your Windows PC in real time!
+- **Two-Way Clipboard Sharing**:
+  - **PC ➔ iPhone**: Anything copied on your PC or clicked on the Top Island dock is immediately sent to your phone. Open the web interface on your phone to see latest PC clips and 1-tap copy directly into iOS clipboard or open links in Safari.
+  - **iPhone ➔ PC**: Type or paste on your mobile browser, tap **Send to PC**, and it is instantly injected into your Windows system clipboard (`Ctrl+V` ready) and Top Island dock.
+  - **Context Menu Actions**: Right-click any slot on your PC Top Island dock and click **📱 Send to iPhone** to push any specific clip on demand.
+- **Modern Apple-Style Light Theme**: Mobile web interface is designed with a clean, native iOS light theme by default (`#F8FAFC`, crisp typography, and touch-optimized buttons).
 - **Zero Cloud & Zero Internet Dependency**: Runs a high-performance local TCP HTTP server directly on your PC. Traffic never leaves your local Wi-Fi router.
 - **Works with Any Mobile Browser**: No mobile app installation required. Simply open the local URL in Safari or Chrome on your phone.
 - **Instant System Injection**: As soon as you tap **Send to PC** on your phone, the content is:

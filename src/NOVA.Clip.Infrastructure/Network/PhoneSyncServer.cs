@@ -13,6 +13,10 @@ namespace NOVA.Clip.Infrastructure.Network;
 public class PhoneSyncServer : IPhoneSyncServer
 {
     private readonly ILogger<PhoneSyncServer> _logger;
+    private readonly object _lock = new();
+    private readonly List<PhoneSyncItem> _pcItems = new();
+    private const int MaxPcItems = 20;
+
     private TcpListener? _listener;
     private CancellationTokenSource? _cts;
     private string _localIp = "127.0.0.1";
@@ -72,6 +76,55 @@ public class PhoneSyncServer : IPhoneSyncServer
             _listener?.Stop();
         }
         catch { }
+    }
+
+    public void PushTextFromPc(string text, string type = "Text", string sourceApp = "PC")
+    {
+        if (string.IsNullOrWhiteSpace(text)) return;
+
+        lock (_lock)
+        {
+            string trimmed = text.Trim();
+
+            // Avoid consecutive identical entries
+            if (_pcItems.Count > 0 && _pcItems[0].Text == trimmed)
+            {
+                _pcItems[0].Timestamp = DateTime.UtcNow;
+                return;
+            }
+
+            var item = new PhoneSyncItem
+            {
+                Text = trimmed,
+                Type = type,
+                SourceApp = sourceApp,
+                Timestamp = DateTime.UtcNow
+            };
+
+            _pcItems.Insert(0, item);
+            if (_pcItems.Count > MaxPcItems)
+            {
+                _pcItems.RemoveAt(_pcItems.Count - 1);
+            }
+        }
+
+        _logger.LogInformation("Pushed PC clip to Phone Sync ({Type}): {Snippet}", type, text.Length > 30 ? text[..30] + "..." : text);
+    }
+
+    public string? GetLatestPcText()
+    {
+        lock (_lock)
+        {
+            return _pcItems.Count > 0 ? _pcItems[0].Text : null;
+        }
+    }
+
+    public IReadOnlyList<PhoneSyncItem> GetRecentPcItems()
+    {
+        lock (_lock)
+        {
+            return _pcItems.ToList();
+        }
     }
 
     private async Task AcceptLoopAsync(CancellationToken token)
@@ -134,49 +187,48 @@ public class PhoneSyncServer : IPhoneSyncServer
 
                 string contentType = headers.TryGetValue("Content-Type", out string? ct) ? ct : string.Empty;
 
-                if (method == "GET" && (path == "/" || path.StartsWith("/?")))
+                if (method == "OPTIONS")
+                {
+                    await SendResponseAsync(stream, "204 No Content", "text/plain", string.Empty);
+                }
+                else if (method == "GET" && (path == "/" || path.StartsWith("/?")))
                 {
                     await SendHtmlResponseAsync(stream, GetWebUiHtml());
                 }
                 else if (method == "GET" && path == "/api/status")
                 {
-                    await SendJsonResponseAsync(stream, new { status = "online", url = ServerUrl, app = "NOVA Clip" });
+                    await SendJsonResponseAsync(stream, new
+                    {
+                        status = "online",
+                        url = ServerUrl,
+                        app = "NOVA Clip",
+                        machineName = Environment.MachineName
+                    });
+                }
+                else if (method == "GET" && (path == "/api/pc-clips" || path == "/api/from-pc"))
+                {
+                    var items = GetRecentPcItems().Select(i => new
+                    {
+                        id = i.Id,
+                        text = i.Text,
+                        type = i.Type,
+                        sourceApp = i.SourceApp,
+                        timestamp = i.Timestamp.ToString("o"),
+                        timeAgo = FormatTimeAgo(i.Timestamp)
+                    });
+
+                    await SendJsonResponseAsync(stream, new
+                    {
+                        success = true,
+                        latest = GetLatestPcText(),
+                        items
+                    });
                 }
                 else if (method == "POST" && path == "/api/clip")
                 {
-                    string body = string.Empty;
-                    if (contentLength > 0)
-                    {
-                        char[] buffer = new char[contentLength];
-                        int read = await reader.ReadBlockAsync(buffer, 0, contentLength);
-                        body = new string(buffer, 0, read);
-                    }
-
-                    string text = string.Empty;
-                    if (contentType.Contains("application/json"))
-                    {
-                        try
-                        {
-                            using var doc = JsonDocument.Parse(body);
-                            if (doc.RootElement.TryGetProperty("text", out var textProp))
-                            {
-                                text = textProp.GetString() ?? string.Empty;
-                            }
-                        }
-                        catch { }
-                    }
-                    else if (contentType.Contains("application/x-www-form-urlencoded"))
-                    {
-                        var match = Regex.Match(body, @"(?:^|&)text=([^&]*)");
-                        if (match.Success)
-                        {
-                            text = Uri.UnescapeDataString(match.Groups[1].Value.Replace('+', ' '));
-                        }
-                    }
-                    else
-                    {
-                        text = body;
-                    }
+                    // iPhone -> PC
+                    string body = await ReadBodyAsync(reader, contentLength);
+                    string text = ExtractTextFromBody(body, contentType);
 
                     if (!string.IsNullOrWhiteSpace(text))
                     {
@@ -186,6 +238,24 @@ public class PhoneSyncServer : IPhoneSyncServer
                     else
                     {
                         await SendJsonResponseAsync(stream, new { success = false, message = "Empty content received" }, 400);
+                    }
+                }
+                else if (method == "POST" && (path == "/api/to-phone" || path == "/api/send-to-phone"))
+                {
+                    // PC -> iPhone
+                    string body = await ReadBodyAsync(reader, contentLength);
+                    string text = ExtractTextFromBody(body, contentType);
+
+                    if (!string.IsNullOrWhiteSpace(text))
+                    {
+                        bool isUrl = text.StartsWith("http://", StringComparison.OrdinalIgnoreCase) ||
+                                     text.StartsWith("https://", StringComparison.OrdinalIgnoreCase);
+                        PushTextFromPc(text.Trim(), isUrl ? "Link" : "Text", "Web User");
+                        await SendJsonResponseAsync(stream, new { success = true, message = "Sent to phone!" });
+                    }
+                    else
+                    {
+                        await SendJsonResponseAsync(stream, new { success = false, message = "Empty content" }, 400);
                     }
                 }
                 else if (method == "POST" && path == "/api/upload")
@@ -226,6 +296,39 @@ public class PhoneSyncServer : IPhoneSyncServer
         }
     }
 
+    private static async Task<string> ReadBodyAsync(StreamReader reader, int contentLength)
+    {
+        if (contentLength <= 0) return string.Empty;
+        char[] buffer = new char[contentLength];
+        int read = await reader.ReadBlockAsync(buffer, 0, contentLength);
+        return new string(buffer, 0, read);
+    }
+
+    private static string ExtractTextFromBody(string body, string contentType)
+    {
+        if (contentType.Contains("application/json"))
+        {
+            try
+            {
+                using var doc = JsonDocument.Parse(body);
+                if (doc.RootElement.TryGetProperty("text", out var textProp))
+                {
+                    return textProp.GetString() ?? string.Empty;
+                }
+            }
+            catch { }
+        }
+        else if (contentType.Contains("application/x-www-form-urlencoded"))
+        {
+            var match = Regex.Match(body, @"(?:^|&)text=([^&]*)");
+            if (match.Success)
+            {
+                return Uri.UnescapeDataString(match.Groups[1].Value.Replace('+', ' '));
+            }
+        }
+        return body;
+    }
+
     private string SaveUploadedFile(byte[] rawData, string contentType)
     {
         try
@@ -235,7 +338,6 @@ public class PhoneSyncServer : IPhoneSyncServer
 
             string filename = $"Phone_Transfer_{DateTime.Now:yyyyMMdd_HHmmss}.bin";
 
-            // If multipart/form-data, extract filename and clean content
             if (contentType.Contains("boundary="))
             {
                 string text = Encoding.Latin1.GetString(rawData);
@@ -330,6 +432,16 @@ public class PhoneSyncServer : IPhoneSyncServer
         return "127.0.0.1";
     }
 
+    private static string FormatTimeAgo(DateTime dt)
+    {
+        var span = DateTime.UtcNow - dt;
+        if (span.TotalSeconds < 30) return "Just now";
+        if (span.TotalMinutes < 1) return $"{Math.Max(1, (int)span.TotalSeconds)}s ago";
+        if (span.TotalHours < 1) return $"{(int)span.TotalMinutes}m ago";
+        if (span.TotalDays < 1) return $"{(int)span.TotalHours}h ago";
+        return dt.ToString("MMM d");
+    }
+
     private static string GetWebUiHtml()
     {
         return """
@@ -338,63 +450,415 @@ public class PhoneSyncServer : IPhoneSyncServer
         <head>
             <meta charset="UTF-8">
             <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
-            <title>NOVA Clip • Phone to PC</title>
+            <title>NOVA Clip • Two-Way Sync</title>
             <style>
                 :root {
-                    --bg: #0D0E12;
-                    --card: #181920;
-                    --border: #282A36;
+                    --bg: #F8FAFC;
+                    --card: #FFFFFF;
+                    --card-inner: #F1F5F9;
+                    --border: #E2E8F0;
+                    --border-focus: #3B82F6;
+                    --text-primary: #0F172A;
+                    --text-secondary: #475569;
+                    --text-muted: #64748B;
                     --accent: #2563EB;
                     --accent-hover: #1D4ED8;
-                    --text: #F3F4F6;
-                    --text-muted: #9CA3AF;
+                    --accent-light: #EFF6FF;
                     --success: #10B981;
+                    --success-bg: #ECFDF5;
+                    --success-border: #A7F3D0;
+                    --shadow: 0 4px 20px -2px rgba(0, 0, 0, 0.06), 0 2px 6px -1px rgba(0, 0, 0, 0.04);
                 }
-                * { box-sizing: border-box; margin: 0; padding: 0; -webkit-tap-highlight-color: transparent; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; }
-                body { background: var(--bg); color: var(--text); padding: 20px 16px; min-height: 100vh; display: flex; flex-direction: column; align-items: center; }
-                .container { width: 100%; max-width: 480px; }
-                .header { text-align: center; margin-bottom: 24px; }
-                .logo-circle { width: 54px; height: 54px; border-radius: 50%; border: 3px solid #FFF; margin: 0 auto 12px; display: flex; align-items: center; justify-content: center; position: relative; }
-                .logo-dot { width: 12px; height: 12px; background: #FFF; border-radius: 50%; position: absolute; right: 10px; top: 18px; }
-                h1 { font-size: 22px; font-weight: 700; margin-bottom: 4px; }
-                p.sub { font-size: 13px; color: var(--text-muted); }
-                .card { background: var(--card); border: 1px solid var(--border); border-radius: 16px; padding: 18px; margin-bottom: 16px; box-shadow: 0 10px 25px rgba(0,0,0,0.4); }
-                textarea { width: 100%; height: 140px; background: #101116; border: 1px solid var(--border); border-radius: 12px; color: var(--text); padding: 14px; font-size: 16px; resize: none; outline: none; margin-bottom: 14px; transition: border 0.2s; }
-                textarea:focus { border-color: var(--accent); }
-                .btn { display: flex; align-items: center; justify-content: center; width: 100%; padding: 14px; border-radius: 12px; font-size: 15px; font-weight: 600; cursor: pointer; border: none; transition: transform 0.1s, background 0.2s; }
-                .btn:active { transform: scale(0.98); }
-                .btn-primary { background: var(--accent); color: white; margin-bottom: 10px; }
-                .btn-primary:hover { background: var(--accent-hover); }
-                .btn-secondary { background: #222530; color: var(--text); border: 1px solid var(--border); }
-                .btn-file { background: transparent; border: 1px dashed var(--border); color: var(--text-muted); margin-top: 14px; padding: 12px; }
-                .status-banner { display: none; background: #064E3B; border: 1px solid var(--success); color: #34D399; padding: 12px 16px; border-radius: 12px; font-size: 14px; font-weight: 500; text-align: center; margin-bottom: 16px; }
-                .badge { display: inline-block; padding: 3px 8px; border-radius: 6px; font-size: 11px; font-weight: 600; background: #1E293B; color: #60A5FA; margin-bottom: 10px; }
-                .footer { text-align: center; font-size: 11px; color: var(--text-muted); margin-top: auto; padding-top: 20px; }
+                * {
+                    box-sizing: border-box;
+                    margin: 0;
+                    padding: 0;
+                    -webkit-tap-highlight-color: transparent;
+                    font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+                }
+                body {
+                    background: var(--bg);
+                    color: var(--text-primary);
+                    padding: 16px 14px 40px;
+                    min-height: 100vh;
+                    display: flex;
+                    flex-direction: column;
+                    align-items: center;
+                }
+                .container {
+                    width: 100%;
+                    max-width: 500px;
+                }
+
+                /* Header */
+                .header {
+                    text-align: center;
+                    margin-bottom: 18px;
+                }
+                .logo-box {
+                    width: 52px;
+                    height: 52px;
+                    background: #FFFFFF;
+                    border: 1px solid var(--border);
+                    border-radius: 14px;
+                    margin: 0 auto 10px;
+                    display: flex;
+                    align-items: center;
+                    justify-content: center;
+                    box-shadow: 0 4px 12px rgba(0, 0, 0, 0.05);
+                }
+                .logo-box svg {
+                    width: 28px;
+                    height: 28px;
+                }
+                h1 {
+                    font-size: 20px;
+                    font-weight: 700;
+                    color: var(--text-primary);
+                    letter-spacing: -0.3px;
+                }
+                p.sub {
+                    font-size: 13px;
+                    color: var(--text-muted);
+                    margin-top: 2px;
+                }
+                .status-pill {
+                    display: inline-flex;
+                    align-items: center;
+                    gap: 6px;
+                    background: #ECFDF5;
+                    border: 1px solid var(--success-border);
+                    color: #047857;
+                    font-size: 11.5px;
+                    font-weight: 600;
+                    padding: 4px 10px;
+                    border-radius: 20px;
+                    margin-top: 8px;
+                }
+                .status-dot {
+                    width: 7px;
+                    height: 7px;
+                    background: var(--success);
+                    border-radius: 50%;
+                    box-shadow: 0 0 6px rgba(16, 185, 129, 0.6);
+                }
+
+                /* Notification Banners */
+                .banner {
+                    display: none;
+                    padding: 12px 14px;
+                    border-radius: 12px;
+                    font-size: 13px;
+                    font-weight: 500;
+                    text-align: center;
+                    margin-bottom: 14px;
+                    animation: fadeIn 0.2s ease;
+                }
+                .banner-success {
+                    background: var(--success-bg);
+                    border: 1px solid var(--success-border);
+                    color: #065F46;
+                }
+                @keyframes fadeIn {
+                    from { opacity: 0; transform: translateY(-4px); }
+                    to { opacity: 1; transform: translateY(0); }
+                }
+
+                /* Cards */
+                .card {
+                    background: var(--card);
+                    border: 1px solid var(--border);
+                    border-radius: 18px;
+                    padding: 18px 16px;
+                    margin-bottom: 16px;
+                    box-shadow: var(--shadow);
+                }
+                .card-header {
+                    display: flex;
+                    align-items: center;
+                    justify-content: space-between;
+                    margin-bottom: 12px;
+                }
+                .section-badge {
+                    display: inline-flex;
+                    align-items: center;
+                    gap: 5px;
+                    padding: 4px 9px;
+                    border-radius: 7px;
+                    font-size: 11px;
+                    font-weight: 700;
+                    letter-spacing: 0.4px;
+                    text-transform: uppercase;
+                }
+                .badge-from-pc {
+                    background: #EFF6FF;
+                    color: #1D4ED8;
+                }
+                .badge-to-pc {
+                    background: #F1F5F9;
+                    color: #334155;
+                }
+                .badge-live {
+                    font-size: 10px;
+                    font-weight: 600;
+                    color: var(--text-muted);
+                }
+
+                /* Content Box for Received from PC */
+                .clip-preview-box {
+                    background: var(--card-inner);
+                    border: 1px solid var(--border);
+                    border-radius: 12px;
+                    padding: 14px;
+                    margin-bottom: 12px;
+                    max-height: 160px;
+                    overflow-y: auto;
+                    font-size: 14px;
+                    line-height: 1.45;
+                    word-break: break-word;
+                    color: var(--text-primary);
+                }
+                .clip-meta {
+                    display: flex;
+                    align-items: center;
+                    justify-content: space-between;
+                    font-size: 11px;
+                    color: var(--text-muted);
+                    margin-bottom: 6px;
+                }
+                .clip-type-pill {
+                    font-size: 9.5px;
+                    font-weight: 700;
+                    padding: 2px 6px;
+                    border-radius: 4px;
+                    text-transform: uppercase;
+                }
+                .type-link { background: #E0F2FE; color: #0369A1; }
+                .type-text { background: #EDE9FE; color: #6D28D9; }
+
+                /* Buttons */
+                .btn {
+                    display: flex;
+                    align-items: center;
+                    justify-content: center;
+                    gap: 7px;
+                    width: 100%;
+                    padding: 13px 16px;
+                    border-radius: 12px;
+                    font-size: 14.5px;
+                    font-weight: 600;
+                    cursor: pointer;
+                    border: none;
+                    transition: all 0.15s ease;
+                }
+                .btn:active {
+                    transform: scale(0.98);
+                }
+                .btn-copy {
+                    background: #059669;
+                    color: #FFFFFF;
+                }
+                .btn-copy:hover {
+                    background: #047857;
+                }
+                .btn-copy.copied {
+                    background: #10B981;
+                }
+                .btn-open {
+                    background: #FFFFFF;
+                    color: var(--accent);
+                    border: 1px solid #BFDBFE;
+                    margin-top: 8px;
+                }
+                .btn-open:hover {
+                    background: #EFF6FF;
+                }
+                .btn-primary {
+                    background: var(--accent);
+                    color: #FFFFFF;
+                    margin-top: 10px;
+                }
+                .btn-primary:hover {
+                    background: var(--accent-hover);
+                }
+                .btn-secondary {
+                    background: #FFFFFF;
+                    color: var(--text-secondary);
+                    border: 1px solid var(--border);
+                    margin-top: 8px;
+                }
+                .btn-secondary:hover {
+                    background: #F8FAFC;
+                }
+                .btn-file {
+                    background: #F8FAFC;
+                    border: 1.5px dashed var(--border);
+                    color: var(--text-muted);
+                    margin-top: 10px;
+                    padding: 11px;
+                    font-size: 13px;
+                }
+                .btn-file:hover {
+                    border-color: var(--accent);
+                    color: var(--accent);
+                }
+
+                /* Form Controls */
+                textarea {
+                    width: 100%;
+                    height: 110px;
+                    background: var(--card-inner);
+                    border: 1px solid var(--border);
+                    border-radius: 12px;
+                    color: var(--text-primary);
+                    padding: 12px 14px;
+                    font-size: 15px;
+                    line-height: 1.4;
+                    resize: none;
+                    outline: none;
+                    transition: border-color 0.2s;
+                }
+                textarea:focus {
+                    border-color: var(--accent);
+                    background: #FFFFFF;
+                }
+
+                /* History List for PC Clips */
+                .history-toggle {
+                    display: flex;
+                    align-items: center;
+                    justify-content: space-between;
+                    font-size: 12px;
+                    font-weight: 600;
+                    color: var(--text-muted);
+                    padding: 8px 0 4px;
+                    cursor: pointer;
+                    user-select: none;
+                }
+                .history-list {
+                    margin-top: 8px;
+                    border-top: 1px solid var(--border);
+                    padding-top: 8px;
+                }
+                .history-item {
+                    display: flex;
+                    align-items: center;
+                    justify-content: space-between;
+                    padding: 9px 10px;
+                    background: var(--card-inner);
+                    border: 1px solid var(--border);
+                    border-radius: 10px;
+                    margin-bottom: 6px;
+                    font-size: 12.5px;
+                }
+                .history-item-text {
+                    flex: 1;
+                    white-space: nowrap;
+                    overflow: hidden;
+                    text-overflow: ellipsis;
+                    margin-right: 10px;
+                    color: var(--text-primary);
+                }
+                .btn-mini-copy {
+                    padding: 5px 9px;
+                    background: #FFFFFF;
+                    border: 1px solid var(--border);
+                    border-radius: 7px;
+                    font-size: 11px;
+                    font-weight: 600;
+                    color: var(--accent);
+                    cursor: pointer;
+                    white-space: nowrap;
+                }
+                .btn-mini-copy:active {
+                    background: #EFF6FF;
+                }
+
+                /* Footer */
+                .footer {
+                    text-align: center;
+                    font-size: 11px;
+                    color: var(--text-muted);
+                    margin-top: 8px;
+                }
+                .empty-hint {
+                    text-align: center;
+                    color: var(--text-muted);
+                    font-size: 13px;
+                    padding: 20px 10px;
+                }
             </style>
         </head>
         <body>
             <div class="container">
+                <!-- Header -->
                 <div class="header">
-                    <div class="logo-circle">
-                        <div class="logo-dot"></div>
+                    <div class="logo-box">
+                        <svg viewBox="0 0 24 24" fill="none" stroke="#0F172A" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
+                            <rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect>
+                            <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path>
+                        </svg>
                     </div>
-                    <h1>NOVA Clip • Phone Sync</h1>
-                    <p class="sub">Instant transfer to your Windows PC clipboard &amp; Top Island</p>
+                    <h1>NOVA Clip • Two-Way Sync</h1>
+                    <p class="sub">Instant Local Wi-Fi Bridge (PC ⇄ iPhone)</p>
+                    <div class="status-pill">
+                        <span class="status-dot"></span>
+                        <span id="connStatus">Connected &amp; Live</span>
+                    </div>
                 </div>
 
-                <div id="statusBanner" class="status-banner">
-                    ✓ Sent to your PC! It's now in your clipboard &amp; Top Island.
-                </div>
+                <!-- Toast Banner -->
+                <div id="statusBanner" class="banner banner-success"></div>
 
+                <!-- ================= SECTION 1: RECEIVED FROM PC (PC -> iPhone) ================= -->
                 <div class="card">
-                    <span class="badge">LINKS &amp; TEXT</span>
+                    <div class="card-header">
+                        <span class="section-badge badge-from-pc">📥 Received from PC</span>
+                        <span class="badge-live" id="liveSyncTag">🔄 Live Feed</span>
+                    </div>
+
+                    <div id="pcClipContainer">
+                        <div class="clip-meta">
+                            <span id="pcClipType" class="clip-type-pill type-text">TEXT</span>
+                            <span id="pcClipTime">Just now</span>
+                        </div>
+                        <div id="pcClipPreview" class="clip-preview-box">
+                            Waiting for text or links from your PC...
+                        </div>
+
+                        <button id="btnCopyFromPc" class="btn btn-copy" onclick="copyPcClipToPhone()">
+                            📋 Copy to iPhone Clipboard
+                        </button>
+
+                        <button id="btnOpenLink" class="btn btn-open" style="display:none" onclick="openPcLink()">
+                            🔗 Open Link in Safari
+                        </button>
+                    </div>
+
+                    <!-- Collapsible Recent PC History -->
+                    <div class="history-toggle" onclick="toggleHistory()">
+                        <span>Recent Clips from PC (<span id="historyCount">0</span>)</span>
+                        <span id="historyArrow">▼</span>
+                    </div>
+                    <div id="historyList" class="history-list" style="display:none">
+                        <!-- Populated dynamically -->
+                    </div>
+                </div>
+
+                <!-- ================= SECTION 2: SEND TO PC (iPhone -> PC) ================= -->
+                <div class="card">
+                    <div class="card-header">
+                        <span class="section-badge badge-to-pc">📤 Send to PC</span>
+                        <span class="badge-live">Top Island Dock</span>
+                    </div>
+
                     <textarea id="textInput" placeholder="Paste links, websites, or text from your phone here..."></textarea>
                     
-                    <button class="btn btn-primary" onclick="sendText()">
+                    <button class="btn btn-primary" onclick="sendTextToPc()">
                         🚀 Send to PC Clipboard
                     </button>
                     
-                    <button class="btn btn-secondary" onclick="pasteFromPhone()">
+                    <button class="btn btn-secondary" onclick="pasteFromPhoneAndSend()">
                         📋 Paste from iPhone &amp; Send
                     </button>
 
@@ -405,12 +869,155 @@ public class PhoneSyncServer : IPhoneSyncServer
                 </div>
 
                 <div class="footer">
-                    Connected via Local Wi-Fi • 100% Offline &amp; Private
+                    100% Offline • Protected Local Wi-Fi • No Cloud
                 </div>
             </div>
 
             <script>
-                async function sendText() {
+                let currentPcText = '';
+                let lastSeenId = '';
+                let isHistoryOpen = false;
+
+                // Load initial PC clips & start real-time polling
+                fetchPcClips();
+                setInterval(fetchPcClips, 2500);
+
+                async function fetchPcClips() {
+                    try {
+                        const res = await fetch('/api/pc-clips');
+                        if (!res.ok) return;
+                        const data = await res.json();
+
+                        if (data && data.items && data.items.length > 0) {
+                            const latest = data.items[0];
+                            document.getElementById('historyCount').innerText = data.items.length;
+
+                            if (latest.id !== lastSeenId) {
+                                lastSeenId = latest.id;
+                                currentPcText = latest.text;
+
+                                // Update main preview
+                                document.getElementById('pcClipPreview').innerText = latest.text;
+                                document.getElementById('pcClipTime').innerText = latest.timeAgo || 'Just now';
+
+                                const typeBadge = document.getElementById('pcClipType');
+                                const isOpenable = isUrl(latest.text);
+
+                                if (isOpenable) {
+                                    typeBadge.innerText = 'LINK';
+                                    typeBadge.className = 'clip-type-pill type-link';
+                                    document.getElementById('btnOpenLink').style.display = 'flex';
+                                } else {
+                                    typeBadge.innerText = (latest.type || 'TEXT').toUpperCase();
+                                    typeBadge.className = 'clip-type-pill type-text';
+                                    document.getElementById('btnOpenLink').style.display = 'none';
+                                }
+
+                                document.getElementById('btnCopyFromPc').style.display = 'flex';
+                            }
+
+                            // Render history items
+                            renderHistory(data.items);
+                        } else {
+                            document.getElementById('pcClipPreview').innerHTML = '<div class="empty-hint">Copy anything on your PC (or right-click a slot on Top Island and choose Send to Phone) and it will appear here instantly.</div>';
+                            document.getElementById('btnCopyFromPc').style.display = 'none';
+                            document.getElementById('btnOpenLink').style.display = 'none';
+                        }
+                    } catch (e) {
+                        // Connection retry
+                    }
+                }
+
+                function renderHistory(items) {
+                    const list = document.getElementById('historyList');
+                    list.innerHTML = '';
+                    
+                    items.forEach((item, index) => {
+                        const row = document.createElement('div');
+                        row.className = 'history-item';
+                        
+                        const textSpan = document.createElement('span');
+                        textSpan.className = 'history-item-text';
+                        textSpan.innerText = item.text;
+                        
+                        const copyBtn = document.createElement('button');
+                        copyBtn.className = 'btn-mini-copy';
+                        copyBtn.innerText = '📋 Copy';
+                        copyBtn.onclick = () => copySpecificText(item.text, copyBtn);
+
+                        row.appendChild(textSpan);
+                        row.appendChild(copyBtn);
+                        list.appendChild(row);
+                    });
+                }
+
+                function toggleHistory() {
+                    isHistoryOpen = !isHistoryOpen;
+                    document.getElementById('historyList').style.display = isHistoryOpen ? 'block' : 'none';
+                    document.getElementById('historyArrow').innerText = isHistoryOpen ? '▲' : '▼';
+                }
+
+                async function copyPcClipToPhone() {
+                    if (!currentPcText) return;
+                    await performCopy(currentPcText, document.getElementById('btnCopyFromPc'));
+                }
+
+                async function copySpecificText(text, buttonElement) {
+                    await performCopy(text, buttonElement);
+                }
+
+                async function performCopy(text, buttonElement) {
+                    try {
+                        if (navigator.clipboard && navigator.clipboard.writeText) {
+                            await navigator.clipboard.writeText(text);
+                        } else {
+                            // Fallback
+                            const ta = document.createElement('textarea');
+                            ta.value = text;
+                            ta.style.position = 'fixed';
+                            ta.style.opacity = '0';
+                            document.body.appendChild(ta);
+                            ta.focus();
+                            ta.select();
+                            document.execCommand('copy');
+                            document.body.removeChild(ta);
+                        }
+
+                        // Haptic feedback if available
+                        if (navigator.vibrate) navigator.vibrate(40);
+
+                        // Visual feedback on button
+                        const oldText = buttonElement.innerText;
+                        buttonElement.innerText = '✓ Copied to iPhone!';
+                        buttonElement.classList.add('copied');
+                        showBanner('✓ Copied to your iPhone clipboard!');
+
+                        setTimeout(() => {
+                            buttonElement.innerText = oldText;
+                            buttonElement.classList.remove('copied');
+                        }, 2200);
+                    } catch (err) {
+                        alert('Could not copy automatically. Tap and hold the text box to copy manually.');
+                    }
+                }
+
+                function openPcLink() {
+                    if (!currentPcText) return;
+                    let url = currentPcText.trim();
+                    if (!url.startsWith('http://') && !url.startsWith('https://')) {
+                        url = 'https://' + url;
+                    }
+                    window.open(url, '_blank');
+                }
+
+                function isUrl(str) {
+                    if (!str) return false;
+                    const s = str.trim();
+                    return s.startsWith('http://') || s.startsWith('https://') || /^[a-zA-Z0-9-]+\.[a-zA-Z]{2,}(\/.*)?$/.test(s);
+                }
+
+                // Send to PC
+                async function sendTextToPc() {
                     const text = document.getElementById('textInput').value.trim();
                     if (!text) {
                         alert('Please enter or paste something first.');
@@ -426,7 +1033,7 @@ public class PhoneSyncServer : IPhoneSyncServer
 
                         const data = await res.json();
                         if (data.success) {
-                            showSuccess('✓ Sent! Now waiting on your PC Top Island.');
+                            showBanner('🚀 Sent to PC! Now in your PC clipboard & Top Island.');
                             document.getElementById('textInput').value = '';
                         } else {
                             alert(data.message || 'Error sending to PC');
@@ -436,19 +1043,18 @@ public class PhoneSyncServer : IPhoneSyncServer
                     }
                 }
 
-                async function pasteFromPhone() {
+                async function pasteFromPhoneAndSend() {
                     try {
                         if (navigator.clipboard && navigator.clipboard.readText) {
                             const clipText = await navigator.clipboard.readText();
                             if (clipText) {
                                 document.getElementById('textInput').value = clipText;
-                                await sendText();
+                                await sendTextToPc();
                                 return;
                             }
                         }
                     } catch (e) { }
 
-                    // Fallback: focus textarea for manual tap-paste
                     const textarea = document.getElementById('textInput');
                     textarea.focus();
                     textarea.placeholder = "Tap here and choose 'Paste', then tap Send.";
@@ -461,7 +1067,7 @@ public class PhoneSyncServer : IPhoneSyncServer
                     const formData = new FormData();
                     formData.append('file', file);
 
-                    showSuccess('Uploading ' + file.name + ' to PC...');
+                    showBanner('Uploading ' + file.name + ' to PC...');
 
                     try {
                         const res = await fetch('/api/upload', {
@@ -470,7 +1076,7 @@ public class PhoneSyncServer : IPhoneSyncServer
                         });
                         const data = await res.json();
                         if (data.success) {
-                            showSuccess('✓ File ' + data.filename + ' sent to your PC!');
+                            showBanner('📁 File ' + data.filename + ' sent to your PC!');
                         } else {
                             alert('Upload failed');
                         }
@@ -479,11 +1085,11 @@ public class PhoneSyncServer : IPhoneSyncServer
                     }
                 }
 
-                function showSuccess(msg) {
+                function showBanner(msg) {
                     const banner = document.getElementById('statusBanner');
                     banner.innerText = msg;
                     banner.style.display = 'block';
-                    setTimeout(() => { banner.style.display = 'none'; }, 4500);
+                    setTimeout(() => { banner.style.display = 'none'; }, 4000);
                 }
             </script>
         </body>
